@@ -1,0 +1,21 @@
+provider: dashscope
+
+chat:
+  provider: dashscope
+  model_name: deepseek-v4-flash
+
+embedding:
+  provider: dashscope
+  model_name: text-embedding-v4
+
+providers:
+  dashscope:
+    base_url: https://dashscope.aliyuncs.com/compatible-mode/v1
+    api_key_env: DASHSCOPE_API_KEY
+  deepseek:
+    base_url: https://api.deepseek.com
+    api_key_env: DEEPSEEK_API_KEY
+  ollama:
+    base_url: http://localhost:11434
+    chat_model: qwen2.5
+    embedding_model: nomic-embed-text

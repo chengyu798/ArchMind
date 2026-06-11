@@ -1,0 +1,2 @@
+collection_name: agent
+persist_directory: data/chroma_db

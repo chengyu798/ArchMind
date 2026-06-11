@@ -1,0 +1,21 @@
+collection_name: agent
+persist_directory: data/chroma_db
+k: 3
+chunk_size: 200
+chunk_overlap: 20
+separators:
+- '
+
+
+  '
+- '
+
+  '
+- .
+- '!'
+- '?'
+- 。
+- ！
+- ？
+- ' '
+- ''

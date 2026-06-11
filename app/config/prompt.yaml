@@ -1,0 +1,5 @@
+system_prompt_path: prompts/system_prompt.txt
+rag_prompt_path: prompts/rag_prompt.txt
+report_prompt_path: prompts/report_prompt.txt
+tool_prompt_path: prompts/tool_prompt.txt
+memory_prompt_path: prompts/memory_prompt.txt

@@ -1,0 +1,3 @@
+jwt_secret_env: JWT_SECRET_KEY
+access_token_expire_minutes: 1440
+algorithm: HS256
