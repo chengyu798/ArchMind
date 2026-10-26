@@ -3,38 +3,24 @@ import json
 from collections.abc import Generator
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, delete
 from sqlalchemy.orm import Session, selectinload
 
 from app.agent.agent import UserAgentService
 from app.db.database import SessionLocal
-from app.db.models import ChatSession, Message, User
+from app.db.models import ChatSession, Message, User, SessionContextSummary, ChatToolRecord
+from app.agent.execution import ChatExecution, bind_execution
+from app.agent.context_budget import ContextCapacityError
+from app.agent.token_usage import merge_usage
+from app.services.context_service import acquire_lease, release_lease, prepare_context, status_view
 from app.schemas.chat import MessageCreateRequest, SendMessageResponse, SessionCreateRequest, SessionUpdateRequest
 from app.services.memory_service import extract_memories_from_message, format_user_memories
 from app.utils.logger_tool import logger
 
 user_agent_service = UserAgentService()
 EMPTY_ASSISTANT_FALLBACK = "本次没有生成有效回复，请换一种问法后重试。"
-RECENT_HISTORY_MESSAGE_LIMIT = 8
-RECENT_HISTORY_CONTENT_LIMIT = 1200
-
-
-def _truncate_history_content(content: str) -> str:
-    content = content.strip()
-    if len(content) <= RECENT_HISTORY_CONTENT_LIMIT:
-        return content
-    return f"{content[:RECENT_HISTORY_CONTENT_LIMIT]}…"
-
-
 def build_recent_history(messages: list[Message]) -> list[dict[str, str]]:
-    history: list[dict[str, str]] = []
-    for message in sorted(messages, key=lambda item: item.id):
-        if message.role not in {"user", "assistant"}:
-            continue
-        content = _truncate_history_content(message.content)
-        if content:
-            history.append({"role": message.role, "content": content})
-    return history[-RECENT_HISTORY_MESSAGE_LIMIT:]
+    return [{"role": item.role, "content": item.content} for item in sorted(messages, key=lambda item: item.id) if item.role in {"user", "assistant"} and item.content.strip()]
 
 
 def get_owned_session(db: Session, session_id: int, user_id: int) -> ChatSession:
@@ -84,103 +70,100 @@ def update_user_session(db: Session, current_user: User, session_id: int, payloa
 
 def delete_user_session(db: Session, current_user: User, session_id: int) -> None:
     session = get_owned_session(db, session_id, current_user.id)
+    from datetime import datetime, UTC
+    if session.context_lease and session.context_lease_until and session.context_lease_until > datetime.now(UTC).replace(tzinfo=None):
+        raise HTTPException(409, "该会话正在生成回复，请完成后再删除。")
+    db.execute(delete(ChatToolRecord).where(ChatToolRecord.session_id == session_id, ChatToolRecord.user_id == current_user.id))
+    db.execute(delete(SessionContextSummary).where(SessionContextSummary.session_id == session_id, SessionContextSummary.user_id == current_user.id))
     db.delete(session)
     db.commit()
     logger.info(f"[会话管理]删除会话成功，user_id={current_user.id}，session_id={session_id}")
 
 
-def create_user_message(db: Session, current_user: User, session_id: int, payload: MessageCreateRequest) -> SendMessageResponse:
+def save_stream_user_message(db: Session, current_user: User, session_id: int, payload: MessageCreateRequest):
     session = get_owned_session(db, session_id, current_user.id)
-    logger.info(f"[聊天RAG]收到用户消息，user_id={current_user.id}，session_id={session_id}，content_length={len(payload.content)}")
-
-    history = build_recent_history(session.messages)
-    user_message = Message(session_id=session.id, role="user", content=payload.content)
-    db.add(user_message)
-    db.commit()
-    db.refresh(user_message)
-    extract_memories_from_message(db, current_user.id, payload.content)
-    long_term_memory = format_user_memories(db, current_user.id)
-    logger.info(f"[聊天RAG]用户消息保存成功，message_id={user_message.id}")
-
+    lease = acquire_lease(db, current_user.id, session_id)
     try:
-        assistant_content = user_agent_service.generate_answer(payload.content, current_user.id, history, memory=long_term_memory).strip() or EMPTY_ASSISTANT_FALLBACK
-    except Exception as e:
-        logger.error(f"[聊天RAG]RAG 回复生成失败，user_id={current_user.id}，session_id={session_id}，原因：{str(e)}", exc_info=True)
-        assistant_content = "生成回复时出现错误，请稍后重试。"
-
-    assistant_message = Message(session_id=session.id, role="assistant", content=assistant_content)
-    db.add(assistant_message)
-    db.commit()
-    db.refresh(assistant_message)
-    db.refresh(session)
-    logger.info(f"[聊天RAG]助手消息保存成功，message_id={assistant_message.id}，session_id={session_id}")
-
-    return SendMessageResponse(session=session, messages=[user_message, assistant_message])
+        history = build_recent_history(session.messages)
+        user_message = Message(session_id=session.id, role="user", content=payload.content)
+        db.add(user_message); db.commit(); db.refresh(user_message)
+        extract_memories_from_message(db, current_user.id, payload.content)
+        memory = format_user_memories(db, current_user.id)
+        return session, history, memory, user_message.id, lease
+    except BaseException:
+        db.rollback(); release_lease(db, session_id, lease); raise
 
 
-def save_stream_user_message(db: Session, current_user: User, session_id: int, payload: MessageCreateRequest) -> tuple[ChatSession, list[dict[str, str]], str]:
-    session = get_owned_session(db, session_id, current_user.id)
-    logger.info(f"[流式聊天]收到用户消息，user_id={current_user.id}，session_id={session_id}，content_length={len(payload.content)}")
-
-    history = build_recent_history(session.messages)
-    user_message = Message(session_id=session.id, role="user", content=payload.content)
-    db.add(user_message)
-    db.commit()
-    db.refresh(user_message)
-    extract_memories_from_message(db, current_user.id, payload.content)
-    long_term_memory = format_user_memories(db, current_user.id)
-    logger.info(f"[流式聊天]用户消息保存成功，message_id={user_message.id}")
-    return session, history, long_term_memory
+def create_user_message(db: Session, current_user: User, session_id: int, payload: MessageCreateRequest) -> SendMessageResponse:
+    session, history, memory, user_message_id, lease = save_stream_user_message(db, current_user, session_id, payload)
+    events = list(_assistant_events(session_id, current_user.id, payload.content, memory, user_message_id, lease))
+    final = next(event for event in reversed(events) if event['type'] in {'done', 'error'})
+    db.expire_all()
+    return SendMessageResponse(session=db.get(ChatSession, session_id), messages=[db.get(Message, user_message_id), db.get(Message, final['message_id'])])
 
 
 def format_sse(event: str, data: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
 
-def stream_assistant_message(
-    session_id: int,
-    user_id: int,
-    query: str,
-    history: list[dict[str, str]] | None = None,
-    memory: str = "",
-) -> Generator[str, None, None]:
-    logger.info(f"[流式聊天]开始流式响应，user_id={user_id}，session_id={session_id}")
-    assistant_chunks: list[str] = []
-
+def _assistant_events(session_id, user_id, query, memory, user_message_id, lease):
+    execution = ChatExecution(session_id, user_message_id, SessionLocal, lease)
+    answer_usage = None; content_parts = []; failed = False
+    yield {"type": "start", "session_id": session_id}
     try:
-        yield format_sse("start", {"session_id": session_id})
-        for event in user_agent_service.stream_events(query, user_id, history, memory=memory):
-            event_type = event.get("type")
-            if event_type == "message":
-                content = event.get("content", "")
-                assistant_chunks.append(content)
-                yield format_sse("message", {"content": content})
-            elif event_type == "workflow_step":
-                yield format_sse("workflow_step", {"name": event.get("name")})
-            elif event_type == "tool_call":
-                yield format_sse("tool_call", {"name": event.get("name"), "args": event.get("args")})
-            elif event_type == "tool_result":
-                yield format_sse("tool_result", {"name": event.get("name"), "content": event.get("content")})
+        yield {"type": "context_status", "stage": "preparing"}
+        with SessionLocal() as db:
+            history, usage, warning = prepare_context(db, user_id, session_id, user_message_id, query, memory, lease)
+        if usage or warning: execution.compaction_attempts = 1
+        if usage: execution.compaction_usage.append(usage)
+        execution.history = history
+        def prepare(tail, tools, system):
+            with SessionLocal() as db:
+                return prepare_context(db, user_id, session_id, user_message_id, query, memory, lease, tail, tools, system)
+        execution.prepare = prepare
+        yield {"type": "context_status", "stage": "ready", "warning": warning}
+        with bind_execution(execution):
+            for event in user_agent_service.stream_events(query, user_id, history, memory=memory):
+                if event.get('type') == 'usage': answer_usage = event.get('usage')
+                else:
+                    if event.get('type') == 'message': content_parts.append(event.get('content', ''))
+                    yield event
+        content = ''.join(content_parts).strip() or EMPTY_ASSISTANT_FALLBACK
+        if not content_parts: yield {'type': 'message', 'content': content}
+    except Exception as error:
+        failed = True
+        logger.error("[聊天]上下文准备或回答生成失败", exc_info=True)
+        content = str(error) if isinstance(error, ContextCapacityError) else '生成回复时出现错误，请稍后重试。'
+    finally:
+        # Only the lease owner may persist an answer. A stale worker must not
+        # overwrite a newer turn after a lease expiry/recovery.
+        try:
+            compaction_usage = merge_usage(*execution.compaction_usage)
+            total = merge_usage(answer_usage, compaction_usage)
+            with SessionLocal() as db:
+                from app.services.context_service import renew_lease
+                renew_lease(db, user_id, session_id, lease)
+                session = get_owned_session(db, session_id, user_id)
+                assistant = Message(session_id=session_id, role='assistant', content=content if 'content' in locals() else '回复已中断，请重试。', token_usage=total, usage_breakdown={'answer': answer_usage, 'compaction': compaction_usage})
+                db.add(assistant); db.commit(); db.refresh(assistant)
+                final_id = assistant.id
+                context = status_view(db, user_id, session_id)
+        finally:
+            with SessionLocal() as db: release_lease(db, session_id, lease)
+    context['processing'] = False
+    yield {'type': 'error' if failed else 'done', 'message_id': final_id, **({'content': content} if failed else {}), 'token_usage': total, 'usage_breakdown': {'answer': answer_usage, 'compaction': compaction_usage}, 'context': context}
 
-        assistant_content = "".join(assistant_chunks).strip()
-        if not assistant_content:
-            assistant_content = EMPTY_ASSISTANT_FALLBACK
-            yield format_sse("message", {"content": assistant_content})
-        with SessionLocal() as db:
-            session = get_owned_session(db, session_id, user_id)
-            assistant_message = Message(session_id=session.id, role="assistant", content=assistant_content)
-            db.add(assistant_message)
-            db.commit()
-            db.refresh(assistant_message)
-            logger.info(f"[流式聊天]助手消息保存成功，message_id={assistant_message.id}，session_id={session_id}")
-            yield format_sse("done", {"message_id": assistant_message.id})
-    except Exception as e:
-        logger.error(f"[流式聊天]流式响应失败，user_id={user_id}，session_id={session_id}，原因：{str(e)}", exc_info=True)
-        error_content = "生成回复时出现错误，请稍后重试。"
-        with SessionLocal() as db:
-            session = get_owned_session(db, session_id, user_id)
-            assistant_message = Message(session_id=session.id, role="assistant", content=error_content)
-            db.add(assistant_message)
-            db.commit()
-            db.refresh(assistant_message)
-        yield format_sse("error", {"content": error_content})
+
+def stream_assistant_message(session_id: int, user_id: int, query: str, history=None, memory: str = '', user_message_id=None, lease=None):
+    from contextvars import copy_context
+    context = copy_context()
+    iterator = _assistant_events(session_id, user_id, query, memory, user_message_id, lease)
+    try:
+        while True:
+            try: event = context.run(next, iterator)
+            except StopIteration: break
+            yield format_sse(event['type'], {key: value for key, value in event.items() if key != 'type'})
+    finally:
+        context.run(iterator.close)
+        if lease:
+            with SessionLocal() as db: release_lease(db, session_id, lease)

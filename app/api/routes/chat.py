@@ -69,9 +69,31 @@ def stream_message(
     current_user: CurrentUser,
     db: Annotated[Session, Depends(get_db)],
 ):
-    session, history, memory = save_stream_user_message(db, current_user, session_id, payload)
+    session, history, memory, user_message_id, lease = save_stream_user_message(db, current_user, session_id, payload)
     return StreamingResponse(
-        stream_assistant_message(session.id, current_user.id, payload.content, history, memory),
+        stream_assistant_message(session.id, current_user.id, payload.content, history, memory, user_message_id, lease),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache"},
     )
+
+
+@router.get("/sessions/{session_id}/context")
+def context_status(session_id: int, current_user: CurrentUser, db: Annotated[Session, Depends(get_db)]):
+    from app.services.context_service import status_view
+    return status_view(db, current_user.id, session_id)
+
+
+@router.get("/sessions/{session_id}/context/summaries")
+def context_summaries(session_id: int, current_user: CurrentUser, db: Annotated[Session, Depends(get_db)]):
+    from sqlalchemy import select
+    from app.db.models import SessionContextSummary
+    from app.services.context_service import summary_view
+    from app.services.history_service import own_session
+    own_session(db, current_user.id, session_id)
+    return [summary_view(item) for item in db.scalars(select(SessionContextSummary).where(SessionContextSummary.session_id == session_id, SessionContextSummary.user_id == current_user.id).order_by(SessionContextSummary.version.desc()).limit(20)).all()]
+
+
+@router.get("/sessions/{session_id}/history")
+def search_history(session_id: int, current_user: CurrentUser, db: Annotated[Session, Depends(get_db)], query: str = "", message_id: int | None = None):
+    from app.services.history_service import lookup_history
+    return lookup_history(db, current_user.id, session_id, query, message_id, full=message_id is not None)

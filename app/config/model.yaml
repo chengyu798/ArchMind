@@ -1,13 +1,10 @@
 provider: dashscope
-
 chat:
-  provider: dashscope
+  provider: deepseek
   model_name: deepseek-v4-flash
-
 embedding:
   provider: dashscope
   model_name: text-embedding-v4
-
 providers:
   dashscope:
     base_url: https://dashscope.aliyuncs.com/compatible-mode/v1

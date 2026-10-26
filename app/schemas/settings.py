@@ -1,7 +1,5 @@
 """模型设置接口模型。"""
-from typing import Any
-
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class RagSettingsResponse(BaseModel):
@@ -20,13 +18,11 @@ class RagSettingsUpdateRequest(BaseModel):
 class ModelSettingsResponse(BaseModel):
     chat_provider: str
     chat_model: str
-    embedding_provider: str
-    embedding_model: str
-    providers: dict[str, dict[str, Any]]
+    providers: list[str]
 
 
 class ModelSettingsUpdateRequest(BaseModel):
-    chat_provider: str = Field(min_length=1)
-    chat_model: str = Field(min_length=1)
-    embedding_provider: str = Field(min_length=1)
-    embedding_model: str = Field(min_length=1)
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    chat_provider: str = Field(min_length=1, max_length=64)
+    chat_model: str = Field(min_length=1, max_length=200)

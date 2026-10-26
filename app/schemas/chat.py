@@ -16,6 +16,14 @@ class MessageCreateRequest(BaseModel):
     content: str = Field(min_length=1)
 
 
+class TokenUsageResponse(BaseModel):
+    input_tokens: int | None = Field(default=None, ge=0)
+    output_tokens: int | None = Field(default=None, ge=0)
+    total_tokens: int | None = Field(default=None, ge=0)
+    model_calls: int = Field(default=0, ge=0)
+    reported_calls: int = Field(default=0, ge=0)
+
+
 class MessageResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -23,6 +31,8 @@ class MessageResponse(BaseModel):
     session_id: int
     role: str
     content: str
+    token_usage: TokenUsageResponse | None = None
+    usage_breakdown: dict[str, TokenUsageResponse | None] | None = None
     created_at: datetime
 
 

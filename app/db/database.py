@@ -78,6 +78,29 @@ def _ensure_report_columns() -> None:
             connection.execute(text("ALTER TABLE reports ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"))
 
 
+def _ensure_message_columns() -> None:
+    inspector = inspect(engine)
+    if "messages" not in inspector.get_table_names():
+        return
+    column_names = {column["name"] for column in inspector.get_columns("messages")}
+    with engine.begin() as connection:
+        for name in ("token_usage", "usage_breakdown"):
+            if name not in column_names:
+                connection.execute(text(f"ALTER TABLE messages ADD COLUMN {name} JSON"))
+
+
+def _ensure_context_columns() -> None:
+    inspector = inspect(engine)
+    if "sessions" not in inspector.get_table_names():
+        return
+    columns = {column["name"] for column in inspector.get_columns("sessions")}
+    additions = {"context_version": "INTEGER NOT NULL DEFAULT 0", "active_summary_version": "INTEGER NOT NULL DEFAULT 0", "context_lease": "VARCHAR(64)", "context_lease_until": "DATETIME"}
+    with engine.begin() as connection:
+        for name, definition in additions.items():
+            if name not in columns:
+                connection.execute(text(f"ALTER TABLE sessions ADD COLUMN {name} {definition}"))
+
+
 def init_db() -> None:
     from app.db import models
 
@@ -85,3 +108,5 @@ def init_db() -> None:
     _ensure_user_columns()
     _ensure_uploaded_file_columns()
     _ensure_report_columns()
+    _ensure_message_columns()
+    _ensure_context_columns()

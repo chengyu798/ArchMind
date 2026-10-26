@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.database import Base
@@ -37,6 +37,11 @@ class ChatSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
+    context_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    active_summary_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    context_lease: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    context_lease_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
     user: Mapped["User"] = relationship(back_populates="sessions")
     messages: Mapped[list["Message"]] = relationship(back_populates="session", cascade="all, delete-orphan")
 
@@ -48,7 +53,10 @@ class Message(Base):
     session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id"), index=True, nullable=False)
     role: Mapped[str] = mapped_column(String(32), nullable=False)
     content: Mapped[str] = mapped_column(Text, nullable=False)
+    token_usage: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+
+    usage_breakdown: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 
     session: Mapped["ChatSession"] = relationship(back_populates="messages")
 
@@ -141,3 +149,41 @@ class BackgroundJob(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
 
     user: Mapped["User"] = relationship(back_populates="background_jobs")
+
+
+class SessionContextSummary(Base):
+    __tablename__ = "session_context_summaries"
+    __table_args__ = (UniqueConstraint("session_id", "version", name="uq_session_summary_version"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    version: Mapped[int] = mapped_column(Integer)
+    schema_version: Mapped[int] = mapped_column(Integer, default=1)
+    previous_summary_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    covered_through_message_id: Mapped[int] = mapped_column(Integer)
+    content: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    source_fingerprint: Mapped[str] = mapped_column(String(64), default="")
+    status: Mapped[str] = mapped_column(String(32), default="building")
+    context_tokens_before: Mapped[int] = mapped_column(Integer, default=0)
+    context_tokens_after: Mapped[int] = mapped_column(Integer, default=0)
+    summary_tokens: Mapped[int] = mapped_column(Integer, default=0)
+    token_count_method: Mapped[str] = mapped_column(String(80), default="deepseek-v4-local-estimate")
+    summary_model: Mapped[str] = mapped_column(String(200), default="")
+    generation_token_usage: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    error_message: Mapped[str] = mapped_column(Text, default="")
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ChatToolRecord(Base):
+    __tablename__ = "chat_tool_records"
+    __table_args__ = (UniqueConstraint("user_message_id", "tool_call_id", name="uq_chat_tool_call"),)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    session_id: Mapped[int] = mapped_column(ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    user_message_id: Mapped[int] = mapped_column(ForeignKey("messages.id", ondelete="CASCADE"), index=True)
+    tool_call_id: Mapped[str] = mapped_column(String(200))
+    tool_name: Mapped[str] = mapped_column(String(128))
+    arguments: Mapped[dict] = mapped_column(JSON, default=dict)
+    result: Mapped[str] = mapped_column(Text)
+    status: Mapped[str] = mapped_column(String(32))
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

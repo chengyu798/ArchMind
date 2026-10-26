@@ -28,10 +28,13 @@ def _require_ollama():
 
 
 class ChatModelFactory(BaseModelFactory):
+    def __init__(self, config: dict | None = None):
+        self.config = config if config is not None else model_config
+
     def generator(self) -> Optional[BaseChatModel | Embeddings]:
-        chat_config = model_config["chat"]
+        chat_config = self.config["chat"]
         provider = chat_config["provider"]
-        provider_config = model_config["providers"][provider]
+        provider_config = self.config["providers"][provider]
 
         if provider == "ollama":
             _require_ollama()
@@ -47,6 +50,7 @@ class ChatModelFactory(BaseModelFactory):
 
         api_key = get_env_value(provider_config["api_key_env"])
         return ChatOpenAI(
+            stream_usage=True,
             model=chat_config["model_name"],
             api_key=api_key,
             base_url=provider_config["base_url"],
@@ -74,5 +78,4 @@ class EmbeddingsModelFactory(BaseModelFactory):
         raise RuntimeError(f"暂不支持 provider {provider} 的 embedding 模型。")
 
 
-chat_model = ChatModelFactory().generator()
 embedding_model = EmbeddingsModelFactory().generator()

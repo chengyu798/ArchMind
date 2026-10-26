@@ -1,0 +1,17 @@
+# 1M is the full input + output window. Input counts are local estimates;
+# provider usage is authoritative and is tracked separately from occupancy.
+context_window: 1048576
+trigger_ratio: 0.50
+target_min_ratio: 0.20
+target_ratio: 0.25
+target_max_ratio: 0.30
+output_tokens: 65536
+safety_tokens: 8192
+summary_max_tokens: 8192
+summary_timeout_seconds: 120
+lease_seconds: 600
+history_result_tokens: 4096
+supported_models:
+  - deepseek-v4-flash
+  - deepseek-flash
+  - deepseek-v4-pro

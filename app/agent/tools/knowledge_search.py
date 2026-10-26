@@ -1,7 +1,9 @@
 """知识库检索工具，供 Agent 按当前用户检索已入库文件内容。"""
+from langchain.tools import ToolRuntime
 from langchain_core.documents import Document
-from langchain_core.tools import tool
+from langchain_core.tools import ToolException, tool
 
+from app.agent.context import AgentContext
 from app.rag.vector_store import VectorStoreService
 from app.utils.logger_tool import logger
 
@@ -40,8 +42,12 @@ def _format_document(index: int, document: Document) -> str:
     )
 
 
-@tool(description="按当前用户ID检索其私有知识库。仅当问题需要用户上传文件内容时调用；必须传入当前登录用户ID和精炼后的检索问题。返回带来源ID、文件名、文件ID、位置和内容的参考资料。")
-def search_user_knowledge(user_id: int, query: str) -> str:
+@tool(description="检索当前登录用户的私有知识库。仅当问题需要用户上传文件内容时调用，只需提供精炼后的检索问题。用户身份由系统绑定。返回带来源ID、文件名、文件ID、位置和内容的参考资料。")
+def search_user_knowledge(query: str, runtime: ToolRuntime[AgentContext]) -> str:
+    context = runtime.context
+    if not isinstance(context, AgentContext):
+        raise ToolException("缺少可信的登录用户上下文，无法检索知识库。")
+    user_id = context.user_id
     normalized_query = query.strip()
     if not normalized_query:
         return "检索问题不能为空。"

@@ -62,6 +62,7 @@ DELETE /api/chat/sessions/{session_id}
 - 流式聊天：SSE 返回 `start`、`message`、`workflow_step`、`tool_call`、`tool_result`、`done`、`error` 等事件
 - 前端当前主要展示最终回答和引用来源，工具调用过程暂时隐藏
 - 基于用户 ID 做会话、消息、文件、检索和报告的数据隔离
+- 知识库工具通过 `ToolRuntime` 读取后端创建的不可变 `AgentContext`，模型工具参数不包含用户 ID；缺少可信上下文时拒绝检索
 - 已增加空回答兜底：Agent 未返回有效文本时会保存并返回重试提示
 - 用户表达偏好或关注点后，会自动抽取长期记忆并注入后续 Agent 上下文
 
@@ -172,7 +173,7 @@ DELETE /api/memories/{memory_id}
 
 | 工具 | 说明 |
 |---|---|
-| `search_user_knowledge` | 按 user_id 检索当前用户私有知识库，返回来源 ID、文件名、文件 ID、位置和内容 |
+| `search_user_knowledge` | 只接收检索问题，通过后端可信上下文绑定当前用户，返回来源 ID、文件名、文件 ID、位置和内容 |
 | `get_weather` | 调用 Open-Meteo 公开接口查询真实天气 |
 
 当前仍保留但未注册进主 Agent 的预留工具：
@@ -180,7 +181,7 @@ DELETE /api/memories/{memory_id}
 | 工具 | 当前状态 |
 |---|---|
 | `get_current_month` | 代码存在，可用于时间上下文，但当前主 Agent 未注册 |
-| `get_user_id` | 代码存在，但当前通过提示词直接传入 user_id，主 Agent 未注册 |
+| `get_user_id` | 主 Agent 不注册身份查询工具，当前用户 ID 由后端运行时上下文注入 |
 | `fill_context_for_report` | 代码存在，但报告模式当前通过 runtime context 和动态提示词切换实现 |
 
 ---
@@ -188,14 +189,15 @@ DELETE /api/memories/{memory_id}
 ### 9. 模型与设置
 
 - 模型配置集中在 `app/config/model.yaml`
-- 当前主用云端模型能力来自 DashScope（`ChatTongyi` + `DashScopeEmbeddings`）
+- 云端聊天模型可通过 DashScope / DeepSeek / OpenAI-compatible 接入；默认 Embedding 来自 DashScope
 - 已接入 `langchain-ollama`，模型工厂支持 Ollama 聊天模型和 embedding 模型
 - 已通过 `ChatOpenAI` 适配 DeepSeek / OpenAI-compatible 聊天模型 provider
-- embedding provider 当前校验为 DashScope / Ollama，避免误选仅支持聊天的 provider
+- Embedding 模型仅由开发者在后端配置 DashScope / Ollama，页面和模型设置 API 不再提供 Embedding 配置
 - 模型 API Key 已从配置文件中移除，改为环境变量读取
 - 后端支持查看和更新模型配置
 - 后端支持查看和更新 RAG 检索参数（k、chunk_size、chunk_overlap）
-- 前端已提供模型和检索设置页；模型保存后需要重启服务才会让当前进程中的模型实例切换，切片参数需要重新入库后完全生效
+- 前端已提供模型和检索设置页；聊天模型验证成功后立即用于后续消息和报告，失败时保留原配置，进行中的回答继续使用原实例
+- 更换 Embedding 仍需开发者修改后端配置、重启并重新入库；切片参数需要重新入库后完全生效
 
 接口：
 
@@ -281,14 +283,16 @@ sql.yaml        - 历史/空配置，当前未作为主流程配置使用
 
 ### 14. 回归检查
 
-- 已新增轻量回归脚本 `scripts/regression_check.py`
-- 当前覆盖后端语法编译、前端构建、上传格式一致性、引用来源、文件解析格式、报告历史能力、空回答兜底、手动记忆新增、RAG 设置接口、OpenAI-compatible 聊天模型适配等关键静态检查
-- 目前尚未覆盖真实 API 调用、数据库隔离、文件入库异步任务、流式 SSE、长期记忆 CRUD、模型/RAG 设置更新等端到端路径
+- 后端已有 62 项自动化回归检查，覆盖模型即时切换、真实 JWT、用户隔离、知识检索、同步/SSE 工具调用、报告身份绑定及注册/管理员权限
+- 前端已有 5 项 Markdown 渲染检查，覆盖标题/加粗/列表、表格/代码、流式片段、引用卡片及 HTML/危险链接处理
+- 后续继续补齐完整上传入库、异步任务恢复及浏览器端到端流程
 
 运行方式：
 
 ```text
-python3 scripts/regression_check.py
+uv run pytest
+npm --prefix frontend test
+npm --prefix frontend run build
 ```
 
 ---
@@ -300,9 +304,10 @@ python3 scripts/regression_check.py
 | 页面/功能 | 说明 |
 |---|---|
 | 登录/注册页 | 支持登录和注册双模式，token 持久化 |
-| 会话面板 | 新建会话、切换会话、删除会话、会话列表 |
-| 会话标题 | 首轮问题自动提炼标题，支持手动编辑 |
-| 聊天区域 | 流式展示最终回复、历史消息回显、输入框、生成中状态 |
+| 会话面板 | 新建会话、切换会话、删除会话、会话列表；侧栏隐藏会话日期与索引数量，四个功能入口采用底部两行两列图标布局 |
+| 会话标题 | 首轮问题自动提炼标题，悬停标题后通过铅笔图标手动编辑 |
+| 聊天区域 | 流式及历史助手消息支持 Markdown 渲染；滚动条位于主区域最右侧，左侧刻度按对话轮次导航并高亮当前浏览位置，不再展示消息数量 |
+| 聊天输入框 | 支持多行输入、Enter 发送、Shift+Enter 换行；模型选择内置于输入框底部，可展开/收起，管理员可直接即时切换模型 |
 | 引用来源 | 结构化引用来源卡片，支持点击打开原文片段预览 |
 | 文件管理页 | 单独页面展示文件名、状态、上传时间、入库时间、大小和操作 |
 | 文件预览 | 支持查看已上传文件解析后的文本内容，长文本会截断 |
@@ -310,7 +315,7 @@ python3 scripts/regression_check.py
 | 报告生成页 | 支持填写主题、周期、关注重点并生成报告 |
 | 报告历史 | 支持历史报告列表、打开详情、删除和 Markdown 导出 |
 | 长期记忆管理 | 支持查看、手动新增、编辑、删除用户长期记忆 |
-| 模型和检索设置页 | 支持查看和修改聊天模型、embedding 模型、provider、k、chunk_size、chunk_overlap |
+| 模型和检索设置页 | 管理员可即时切换聊天模型和 provider，调整 k、chunk_size、chunk_overlap；Embedding 仅在后端维护 |
 | 视觉主题 | 已改为暖色调界面 |
 | 错误提示 | Toast 弹窗提示上传、入库、标题、报告、记忆、设置等错误 |
 | 状态反馈 | 上传中、生成中、入库中、失败、空状态等反馈 |
@@ -354,7 +359,7 @@ python3 scripts/regression_check.py
 
 | 项目 | 说明 |
 |---|---|
-| 真实 API / E2E 回归测试 | 在轻量脚本基础上扩展登录、注册、上传、预览、入库、状态轮询、知识库问答、SSE、来源定位、报告、记忆、设置、删除等路径 |
+| 用户隔离回归测试 | 已覆盖真实 JWT、SQLite/Chroma 检索过滤、会话/文件/记忆/报告/任务越权、同步及 SSE 工具身份伪造、并发 Agent 调用、注册与管理员权限；后续补浏览器 E2E 和完整上传入库流程 |
 | 数据库迁移体系 | 当前依赖 `create_all` 和手动补列；后续建议接入 Alembic 或版本化迁移脚本，避免表结构漂移 |
 | 异步入库可靠性 | 当前使用 FastAPI BackgroundTasks；后续补充任务进度、失败原因、重试策略、服务重启保护和更清晰的前端状态 |
 | 配置和文案一致性 | 持续校验 `upload.yaml`、前端 accept、空状态文案、回归脚本和 system-status 是否一致 |
@@ -377,7 +382,7 @@ python3 scripts/regression_check.py
 | 混合检索增强 | 已支持向量召回 + 关键词召回 + 加权合并；后续可加入 BM25、query rewrite、rerank 和命中解释 |
 | 检索参数配置页 | 已支持前端调整 k、chunk_size、chunk_overlap；后续可扩展 rerank、重建索引和参数预设 |
 | 模型 provider 完整适配 | 已适配 DashScope、Ollama、DeepSeek/OpenAI-compatible 聊天模型；后续补 provider 健康检查、embedding 能力矩阵和更多 embedding provider |
-| 模型运行时切换 | 当前设置保存后需重启；后续可支持模型实例热加载、失败回退和调用耗时统计 |
+| 模型运行时切换 | 已支持聊天模型即时切换、连接及工具参数验证、失败保留原配置；后续增加调用耗时统计 |
 | LangGraph 可观测性 | 当前已有基础状态流；后续可拆分更多节点，增加 trace、步骤耗时、失败恢复和可视化调试 |
 
 ### P3：平台化和部署
@@ -390,3 +395,20 @@ python3 scripts/regression_check.py
 | CI/CD 测试覆盖 | 单元测试、集成测试、端到端测试、前端可访问性检查和自动化构建 |
 | 部署支持 | Docker Compose、环境变量模板、生产配置、持久化卷、SQLite/ChromaDB 备份与恢复 |
 | 运维与安全 | 访问限流、Token 过期/刷新、上传内容安全校验、日志脱敏、监控告警和多环境配置 |
+
+
+## 2026-10-23：统一前端控件与操作布局
+
+- 排查：长期记忆、模型设置及聊天输入框使用系统原生下拉菜单；会话、文件、记忆、报告删除使用浏览器确认弹窗。设置页 Grid 默认拉伸使表单和按钮异常增高，部分操作缺少键盘入口。
+- 修复：共用 SelectField（键盘导航、选中状态、菜单定位）、NumberField（范围限制、自定义加减）、站内确认弹窗（默认取消、焦点限制、Escape/遮罩取消、焦点归还）。四类删除入口统一接入；会话打开与删除拆为独立按钮，并补充删除失败提示。
+- 布局：设置表单按内容高度排列、主操作右对齐；记忆改为新增表单与列表分栏，类型显示中文且保留接口分类值；报告生成表单、历史列表和预览区调整滚动及空状态布局。
+- 验证：`npm --prefix frontend test` 20/20 通过（本次新增 15 项 UI 交互回归）；`npm --prefix frontend run build` 通过。IAB 在 1280×720 实测设置下拉、记忆键盘选择、聊天模型嵌套菜单、会话删除取消与焦点恢复，并检查报告及记忆布局截图。真实用户数据未删除、模型配置未提交修改；删除确认接口测试使用内存 mock。
+
+
+## 2026-10-23：聊天回复 Token 用量
+
+- 删除聊天输入框右下角的快捷键提示文字，保留 Enter 发送、Shift+Enter 换行交互。
+- 每条助手回复结束后展示输入、输出、合计 Token；按一次回答聚合工具循环中的全部模型调用，读取 LangChain 标准 usage 或服务商 token_usage。OpenAI-compatible 流式请求显式启用 stream_usage；同一模型请求只计一次，服务商未提供的数字不估算。
+- messages 增加可空 token_usage JSON 字段，启动时对旧数据库做幂等增量迁移；同步接口、SSE 完成/错误事件和历史会话都保留用量。旧消息显示未记录，缺失用量显示未返回完整用量。
+- 验证：后端 `python -m pytest -q` 74 项通过，前端 `npm --prefix frontend test` 26 项通过，前端构建通过；新增后端 12 项与前端 6 项用量回归，覆盖多次工具循环、缺失用量、重复回调、并发隔离、同步/流式落库、错误响应、迁移和 SSE 分块解析。
+- 实际页面验证：新建 Token 用量验证会话，deepseek-v4-flash 返回输入 1205、输出 111、合计 1316 Token；刷新并重开会话后数值一致，快捷键小字不再展示。

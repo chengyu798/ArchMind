@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from 'react';
+import { ContextPanel } from './ContextPanel';
+import { TokenUsageFooter } from './TokenUsageFooter';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ChatComposer } from './ChatComposer';
+import { ConversationTimeline } from './ConversationTimeline';
+import { MarkdownContent } from './MarkdownContent';
 import {
   type ChatSession,
   type FilePreviewResponse,
@@ -39,13 +44,20 @@ import {
   updateSession,
   uploadFile,
 } from './api';
+import { UserMenu, UserProfile } from './UserMenu';
+import { NumberField, SelectField, useConfirmDialog } from './UIControls';
 
 const DEFAULT_SESSION_TITLE = '新会话';
 const STREAM_INTERVAL_MS = 32;
 const INDEXABLE_FILE_ACCEPT = '.txt,.md,.pdf,.csv,.docx,.pptx';
-const MEMORY_TYPE_OPTIONS = ['preference', 'focus', 'profile', 'constraint'];
+const MEMORY_TYPE_OPTIONS = [
+  { value: 'preference', label: '偏好' },
+  { value: 'focus', label: '关注点' },
+  { value: 'profile', label: '个人信息' },
+  { value: 'constraint', label: '约束' },
+];
 
-type NavTab = 'sessions' | 'files' | 'reports' | 'memories' | 'settings';
+type NavTab = 'profile' | 'sessions' | 'files' | 'reports' | 'memories' | 'settings';
 
 type Citation = {
   sourceId: string;
@@ -260,15 +272,17 @@ function FilePreviewModal({ preview, onClose }: { preview: FilePreview | null; o
   );
 }
 
-function MessageBubble({ message, streaming = false, onOpenCitation }: { message: Pick<Message, 'role' | 'content'>; streaming?: boolean; onOpenCitation?: (citation: Citation) => void }) {
+export function MessageBubble({ message, streaming = false, onOpenCitation, onOpenHistory }: { message: Pick<Message, 'role' | 'content' | 'token_usage' | 'usage_breakdown'>; streaming?: boolean; onOpenCitation?: (citation: Citation) => void; onOpenHistory?: (id: number) => void }) {
   const parsed = message.role === 'assistant' ? parseMessageContent(message.content) : { body: message.content, citations: [] };
   return (
     <div className={`message message--${message.role}`}>
       <div className="message-content">
-        <span>{parsed.body}</span>
+        {message.role === 'assistant' ? <MarkdownContent content={parsed.body} /> : <span>{parsed.body}</span>}
         {streaming && <span className="stream-cursor" aria-hidden="true" />}
       </div>
       <CitationList citations={parsed.citations} onOpen={onOpenCitation} />
+      {message.role === 'assistant' && !streaming && <div className="history-references">{Array.from(new Set(Array.from(message.content.matchAll(/\[M(\d+)\]/g), (match) => Number(match[1])))).map((id) => <button type="button" className="btn-small" key={id} onClick={() => onOpenHistory?.(id)}>历史来源 M{id}</button>)}</div>}
+      {message.role === 'assistant' && !streaming && <TokenUsageFooter usage={message.token_usage} breakdown={message.usage_breakdown} />}
     </div>
   );
 }
@@ -475,6 +489,7 @@ function FileManager({
 }
 
 function MemoryPage({ token, onToast }: { token: string; onToast: (message: string) => void }) {
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [memories, setMemories] = useState<Memory[]>([]);
   const [loading, setLoading] = useState(false);
   const [editingId, setEditingId] = useState<number | null>(null);
@@ -540,7 +555,7 @@ function MemoryPage({ token, onToast }: { token: string; onToast: (message: stri
   };
 
   const removeMemory = async (memoryId: number) => {
-    if (!window.confirm('确定删除这条长期记忆吗？')) return;
+    if (!(await confirm({ title: '删除这条记忆？', description: '删除后，后续对话将不再使用这条记忆。此操作无法撤销。' })) || !isTokenCurrent(token)) return;
     try {
       await deleteMemory(token, memoryId);
       if (isTokenCurrent(token)) {
@@ -554,6 +569,7 @@ function MemoryPage({ token, onToast }: { token: string; onToast: (message: stri
 
   return (
     <section className="memory-page">
+      {confirmDialog}
       <div className="page-header">
         <div>
           <p className="eyebrow">Memory</p>
@@ -563,65 +579,61 @@ function MemoryPage({ token, onToast }: { token: string; onToast: (message: stri
         <button type="button" className="btn-small btn-small--primary" onClick={loadMemories} disabled={loading}>刷新</button>
       </div>
 
-      <div className="memory-list-card">
+      <div className="memory-layout">
         <form className="memory-item memory-create" onSubmit={addMemory}>
           <div className="memory-item-header">
             <span>新增记忆</span>
             <small>手动补充偏好或关注点</small>
           </div>
-          <select aria-label="新记忆类型" value={newType} onChange={(e) => setNewType(e.target.value)}>
-            {MEMORY_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
-          </select>
+          <SelectField label="新记忆类型" value={newType} onChange={setNewType} options={MEMORY_TYPE_OPTIONS} />
           <textarea aria-label="新记忆内容" value={newContent} onChange={(e) => setNewContent(e.target.value)} rows={3} placeholder="例如：回答时优先给出可执行步骤" />
           <div className="memory-actions">
-            <button type="submit" className="btn-small btn-small--primary">新增</button>
+            <button type="submit" className="btn-small btn-small--primary" disabled={!newContent.trim()}>新增记忆</button>
           </div>
         </form>
-        {memories.length === 0 ? (
-          <div className="empty-state">
-            <h2>{loading ? '正在加载记忆' : '暂无长期记忆'}</h2>
-            <p>当你表达偏好、关注点或后续要求时，系统会自动沉淀为长期记忆。</p>
-          </div>
-        ) : memories.map((memory) => (
-          <article key={memory.id} className="memory-item">
-            {editingId === memory.id ? (
-              <>
-                <select aria-label="记忆类型" value={draftType} onChange={(e) => setDraftType(e.target.value)}>
-                  {MEMORY_TYPE_OPTIONS.map((type) => <option key={type} value={type}>{type}</option>)}
-                </select>
-                <textarea aria-label="记忆内容" value={draftContent} onChange={(e) => setDraftContent(e.target.value)} rows={3} />
-                <div className="memory-actions">
-                  <button type="button" className="btn-small btn-small--primary" onClick={() => saveMemory(memory.id)}>保存</button>
-                  <button type="button" className="btn-small" onClick={() => setEditingId(null)}>取消</button>
-                </div>
-              </>
-            ) : (
-              <>
-                <div className="memory-item-header">
-                  <span>{memory.memory_type}</span>
-                  <small>权重 {memory.weight} · {formatDateTime(memory.updated_at)}</small>
-                </div>
-                <p>{memory.content}</p>
-                <div className="memory-actions">
-                  <button type="button" className="btn-small btn-small--primary" onClick={() => startEdit(memory)}>编辑</button>
-                  <button type="button" className="btn-small btn-danger" onClick={() => removeMemory(memory.id)}>删除</button>
-                </div>
-              </>
-            )}
-          </article>
-        ))}
+        <div className="memory-list-card">
+          {memories.length === 0 ? (
+            <div className="empty-state">
+              <h2>{loading ? '正在加载记忆' : '暂无长期记忆'}</h2>
+              <p>当你表达偏好、关注点或后续要求时，系统会自动沉淀为长期记忆。</p>
+            </div>
+          ) : memories.map((memory) => (
+            <article key={memory.id} className="memory-item">
+              {editingId === memory.id ? (
+                <>
+                  <SelectField label="记忆类型" value={draftType} onChange={setDraftType} options={MEMORY_TYPE_OPTIONS} />
+                  <textarea aria-label="记忆内容" value={draftContent} onChange={(e) => setDraftContent(e.target.value)} rows={3} />
+                  <div className="memory-actions">
+                    <button type="button" className="btn-small btn-small--primary" onClick={() => saveMemory(memory.id)}>保存</button>
+                    <button type="button" className="btn-small" onClick={() => setEditingId(null)}>取消</button>
+                  </div>
+                </>
+              ) : (
+                <>
+                  <div className="memory-item-header">
+                    <span>{MEMORY_TYPE_OPTIONS.find((option) => option.value === memory.memory_type)?.label ?? memory.memory_type}</span>
+                    <small>权重 {memory.weight} · {formatDateTime(memory.updated_at)}</small>
+                  </div>
+                  <p>{memory.content}</p>
+                  <div className="memory-actions">
+                    <button type="button" className="btn-small btn-small--primary" onClick={() => startEdit(memory)}>编辑</button>
+                    <button type="button" className="btn-small btn-danger" onClick={() => removeMemory(memory.id)}>删除</button>
+                  </div>
+                </>
+              )}
+            </article>
+          ))}
+        </div>
       </div>
     </section>
   );
 }
 
-function SettingsPage({ token, user, onToast }: { token: string; user: User; onToast: (message: string) => void }) {
+function SettingsPage({ token, user, onToast, onModelChange }: { token: string; user: User; onToast: (message: string) => void; onModelChange: (settings: ModelSettings) => void }) {
   const [settings, setSettings] = useState<ModelSettings | null>(null);
   const [ragSettings, setRagSettings] = useState<RagSettings | null>(null);
   const [chatProvider, setChatProvider] = useState('');
   const [chatModel, setChatModel] = useState('');
-  const [embeddingProvider, setEmbeddingProvider] = useState('');
-  const [embeddingModel, setEmbeddingModel] = useState('');
   const [ragK, setRagK] = useState(3);
   const [chunkSize, setChunkSize] = useState(200);
   const [chunkOverlap, setChunkOverlap] = useState(20);
@@ -633,10 +645,9 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
       const [nextSettings, nextRagSettings] = await Promise.all([getModelSettings(token), getRagSettings(token)]);
       if (isTokenCurrent(token)) {
         setSettings(nextSettings);
+        onModelChange(nextSettings);
         setChatProvider(nextSettings.chat_provider);
         setChatModel(nextSettings.chat_model);
-        setEmbeddingProvider(nextSettings.embedding_provider);
-        setEmbeddingModel(nextSettings.embedding_model);
         setRagSettings(nextRagSettings);
         setRagK(nextRagSettings.k);
         setChunkSize(nextRagSettings.chunk_size);
@@ -649,8 +660,7 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
 
   useEffect(() => { loadSettings(); }, [token]);
 
-  const providerNames = Object.keys(settings?.providers ?? {});
-  const embeddingProviderNames = providerNames.filter((provider) => ['dashscope', 'ollama'].includes(provider));
+  const providerNames = settings?.providers ?? [];
 
   const saveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -663,12 +673,13 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
       const updated = await updateModelSettings(token, {
         chat_provider: chatProvider,
         chat_model: chatModel.trim(),
-        embedding_provider: embeddingProvider,
-        embedding_model: embeddingModel.trim(),
       });
       if (isTokenCurrent(token)) {
         setSettings(updated);
-        onToast('模型设置已保存，重启后生效');
+        setChatProvider(updated.chat_provider);
+        setChatModel(updated.chat_model);
+        onModelChange(updated);
+        onToast('聊天模型已切换，立即生效');
       }
     } catch (err: unknown) {
       if (isTokenCurrent(token)) onToast(`模型设置保存失败：${parseApiError(err)}`);
@@ -707,7 +718,7 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
         <div>
           <p className="eyebrow">Settings</p>
           <h1>模型和检索设置</h1>
-          <p>配置云端或本地 Ollama 模型；当前进程中的模型实例需要重启后才会切换。</p>
+          <p>切换聊天模型后，后续消息立即使用新模型。</p>
           {!user.is_admin && <p className="settings-note">当前账号不是管理员，只能查看全局设置。</p>}
         </div>
       </div>
@@ -715,33 +726,21 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
       <div className="settings-panels">
         <form className="settings-form" onSubmit={saveSettings}>
           <div className="settings-section-title">
-            <strong>模型设置</strong>
-            <span>切换聊天模型和 embedding 模型，保存后重启服务生效。</span>
+            <strong>聊天模型设置</strong>
+            <span>验证成功后立即切换，正在生成的回答会继续完成。</span>
           </div>
           <label>
-            <span>聊天 Provider</span>
-            <select value={chatProvider} onChange={(e) => setChatProvider(e.target.value)}>
-              {providerNames.map((provider) => <option key={provider} value={provider}>{provider}</option>)}
-            </select>
+            <span>模型服务商</span>
+            <SelectField label="模型服务商" value={chatProvider} onChange={setChatProvider} disabled={saving || !user.is_admin} options={providerNames.map((provider) => ({ value: provider, label: provider }))} />
           </label>
           <label>
             <span>聊天模型</span>
-            <input value={chatModel} onChange={(e) => setChatModel(e.target.value)} placeholder="例如 deepseek-v4-flash / qwen2.5" />
-          </label>
-          <label>
-            <span>Embedding Provider</span>
-            <select value={embeddingProvider} onChange={(e) => setEmbeddingProvider(e.target.value)}>
-              {embeddingProviderNames.map((provider) => <option key={provider} value={provider}>{provider}</option>)}
-            </select>
-          </label>
-          <label>
-            <span>Embedding 模型</span>
-            <input value={embeddingModel} onChange={(e) => setEmbeddingModel(e.target.value)} placeholder="例如 text-embedding-v4 / nomic-embed-text" />
+            <input value={chatModel} onChange={(e) => setChatModel(e.target.value)} placeholder="例如 deepseek-v4-flash / qwen2.5" disabled={saving || !user.is_admin} required />
           </label>
           <div className="settings-note">
-            Ollama 使用本机服务地址：{String(settings?.providers?.ollama?.base_url ?? 'http://localhost:11434')}；DeepSeek 当前仅支持聊天模型。
+            切换失败时会保留当前模型；此设置对所有用户生效。
           </div>
-          <button type="submit" className="btn-primary" disabled={saving || !settings || !user.is_admin}>{saving ? '保存中…' : '保存模型设置'}</button>
+          <div className="form-actions"><button type="submit" className="btn-primary" disabled={saving || !settings || !chatModel.trim() || !user.is_admin}>{saving ? '验证并切换中…' : '保存并立即切换'}</button></div>
         </form>
 
         <form className="settings-form" onSubmit={saveRagSettings}>
@@ -751,20 +750,20 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
           </div>
           <label>
             <span>召回数量 k</span>
-            <input type="number" min="1" max="20" value={ragK} onChange={(e) => setRagK(Number(e.target.value))} />
+            <NumberField label="召回数量 k" min={1} max={20} value={ragK} onChange={setRagK} disabled={savingRag || !user.is_admin} />
           </label>
           <label>
             <span>切片长度 chunk_size</span>
-            <input type="number" min="100" max="3000" value={chunkSize} onChange={(e) => setChunkSize(Number(e.target.value))} />
+            <NumberField label="切片长度 chunk_size" min={100} max={3000} value={chunkSize} onChange={setChunkSize} disabled={savingRag || !user.is_admin} />
           </label>
           <label>
             <span>切片重叠 chunk_overlap</span>
-            <input type="number" min="0" max="1000" value={chunkOverlap} onChange={(e) => setChunkOverlap(Number(e.target.value))} />
+            <NumberField label="切片重叠 chunk_overlap" min={0} max={1000} value={chunkOverlap} onChange={setChunkOverlap} disabled={savingRag || !user.is_admin} />
           </label>
           <div className="settings-note">
             当前分隔符数量：{ragSettings?.separators.length ?? 0}；保存后新检索会使用新的 k，已入库切片需要重建索引才会按新 chunk 参数切分。
           </div>
-          <button type="submit" className="btn-primary" disabled={savingRag || !ragSettings || !user.is_admin}>{savingRag ? '保存中…' : '保存检索参数'}</button>
+          <div className="form-actions"><button type="submit" className="btn-primary" disabled={savingRag || !ragSettings || !user.is_admin}>{savingRag ? '保存中…' : '保存检索参数'}</button></div>
         </form>
       </div>
     </section>
@@ -772,6 +771,7 @@ function SettingsPage({ token, user, onToast }: { token: string; user: User; onT
 }
 
 function ReportPage({ token, onToast }: { token: string; onToast: (message: string) => void }) {
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [topic, setTopic] = useState('知识库使用报告');
   const [period, setPeriod] = useState('本月');
   const [focus, setFocus] = useState('文件入库情况、会话问答情况、后续优化建议');
@@ -881,7 +881,7 @@ function ReportPage({ token, onToast }: { token: string; onToast: (message: stri
   };
 
   const handleDeleteReport = async (reportId: number) => {
-    if (!window.confirm('确定删除这份报告吗？')) return;
+    if (!(await confirm({ title: '删除这份报告？', description: '报告内容和历史记录将被删除，此操作无法撤销。' })) || !isTokenCurrent(token)) return;
     try {
       await deleteReport(token, reportId);
       if (isTokenCurrent(token)) {
@@ -911,6 +911,7 @@ function ReportPage({ token, onToast }: { token: string; onToast: (message: stri
 
   return (
     <section className="report-page">
+      {confirmDialog}
       <div className="page-header">
         <div>
           <p className="eyebrow">Reports</p>
@@ -934,9 +935,11 @@ function ReportPage({ token, onToast }: { token: string; onToast: (message: stri
               <span>关注重点</span>
               <textarea value={focus} onChange={(e) => setFocus(e.target.value)} rows={5} />
             </label>
-            <button type="submit" className="btn-primary" disabled={generating}>
-              {generating ? '生成中…' : '生成报告'}
-            </button>
+            <div className="form-actions">
+              <button type="submit" className="btn-primary" disabled={generating}>
+                {generating ? '生成中…' : '生成报告'}
+              </button>
+            </div>
           </form>
 
           <div className="report-history">
@@ -998,8 +1001,10 @@ function ReportPage({ token, onToast }: { token: string; onToast: (message: stri
 }
 
 export function App() {
+  const { confirm, confirmDialog } = useConfirmDialog();
   const [token, setToken] = useToken();
   const [user, setUser] = useState<User | null>(null);
+  const [activeModel, setActiveModel] = useState<ModelSettings | null>(null);
 
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<number | null>(null);
@@ -1009,7 +1014,12 @@ export function App() {
   const [input, setInput] = useState('');
   const [streaming, setStreaming] = useState(false);
   const [streamingContent, setStreamingContent] = useState('');
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const [contextStage, setContextStage] = useState('');
+  const [contextRefresh, setContextRefresh] = useState(0);
+  const [historyMessageId, setHistoryMessageId] = useState<number | null>(null);
+  const chatScrollRef = useRef<HTMLDivElement>(null);
+  const followLatestRef = useRef(true);
+  const [activeTurn, setActiveTurn] = useState(0);
   const streamBufferRef = useRef('');
   const streamVisibleRef = useRef('');
   const streamTimerRef = useRef<number | null>(null);
@@ -1024,6 +1034,42 @@ export function App() {
   const titleInputRef = useRef<HTMLInputElement>(null);
 
   const activeSession = sessions.find((session) => session.id === activeSessionId) ?? null;
+  const turns = useMemo(() => messages.flatMap((message, index) => message.role === 'user' ? [{ messageIndex: index, question: message.content }] : []), [messages]);
+
+  const updateReadingPosition = () => {
+    const viewport = chatScrollRef.current;
+    if (!viewport) return;
+    const atBottom = viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight < 64;
+    followLatestRef.current = atBottom;
+    let current = 0;
+    const top = viewport.getBoundingClientRect().top + 48;
+    turns.forEach((turn, index) => {
+      const anchor = viewport.querySelector(`[data-message-index="${turn.messageIndex}"]`);
+      if (anchor && anchor.getBoundingClientRect().top <= top) current = index;
+    });
+    setActiveTurn(atBottom ? Math.max(0, turns.length - 1) : current);
+  };
+
+  const jumpToTurn = (index: number) => {
+    const turn = turns[index];
+    if (!turn) return;
+    followLatestRef.current = false;
+    setActiveTurn(index);
+    const anchor = chatScrollRef.current?.querySelector(`[data-message-index="${turn.messageIndex}"]`);
+    anchor?.scrollIntoView({ behavior: window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth', block: 'start' });
+  };
+
+  const switchChatModel = async (provider: string, name: string) => {
+    if (!token || !user?.is_admin) throw new Error('只有管理员可以修改聊天模型。');
+    try {
+      const updated = await updateModelSettings(token, { chat_provider: provider, chat_model: name });
+      if (!isTokenCurrent(token)) return;
+      setActiveModel(updated);
+      setToastMessage('聊天模型已切换，立即生效');
+    } catch (err) {
+      throw new Error(parseApiError(err));
+    }
+  };
 
   const stopStreamTimer = () => {
     if (streamTimerRef.current !== null) {
@@ -1059,6 +1105,7 @@ export function App() {
     streamBufferRef.current = '';
     streamVisibleRef.current = '';
     setUser(null);
+    setActiveModel(null);
     setSessions([]);
     setActiveSessionId(null);
     setMessages([]);
@@ -1123,6 +1170,15 @@ export function App() {
   }, [token, user]);
 
   useEffect(() => {
+    if (!token || !user) return;
+    getModelSettings(token).then((settings) => {
+      if (isTokenCurrent(token)) setActiveModel(settings);
+    }).catch(() => {
+      if (isTokenCurrent(token)) setActiveModel(null);
+    });
+  }, [token, user, navTab]);
+
+  useEffect(() => {
     if (editingTitle) {
       titleInputRef.current?.focus();
       titleInputRef.current?.select();
@@ -1130,6 +1186,8 @@ export function App() {
   }, [editingTitle]);
 
   const switchSession = async (id: number) => {
+    if (streaming) { setToastMessage('请等待当前回复完成后再切换会话'); return; }
+    setHistoryMessageId(null);
     if (!token) return;
     const currentToken = token;
     setNavTab('sessions');
@@ -1204,25 +1262,40 @@ export function App() {
   };
 
   const sendAndStream = async (t: string, sessionId: number, content: string) => {
+    followLatestRef.current = true;
     stopStreamTimer();
     streamBufferRef.current = '';
     streamVisibleRef.current = '';
     setInput('');
     setStreaming(true);
     setStreamingContent('');
+    setContextStage('preparing');
     startStreamTimer();
 
     const userMsg: Message = { id: -1, session_id: sessionId, role: 'user', content, created_at: new Date().toISOString() };
     setMessages((prev) => [...prev, userMsg]);
 
     let fullContent = '';
+    let tokenUsage: Message['token_usage'] = null;
+    let assistantMessageId = -2;
+    let usageBreakdown: Message['usage_breakdown'] = null;
     try {
       await streamMessage(t, sessionId, content, (event: StreamEvent) => {
         if (!isTokenCurrent(t)) return;
         if (event.type === 'message') {
           fullContent += event.content;
           streamBufferRef.current += event.content;
+        } else if (event.type === 'context_status') {
+          setContextStage(event.stage);
+          if (event.warning) setToastMessage(event.warning);
+        } else if (event.type === 'done') {
+          usageBreakdown = event.usage_breakdown ?? null;
+          tokenUsage = event.token_usage ?? null;
+          assistantMessageId = event.message_id ?? -2;
         } else if (event.type === 'error') {
+          usageBreakdown = event.usage_breakdown ?? null;
+          tokenUsage = event.token_usage ?? null;
+          assistantMessageId = event.message_id ?? -2;
           streamBufferRef.current += event.content;
           fullContent += event.content;
         }
@@ -1230,7 +1303,7 @@ export function App() {
 
       await waitForStreamReveal();
       if (!isTokenCurrent(t)) return;
-      setMessages((prev) => [...prev, { id: -2, session_id: sessionId, role: 'assistant', content: fullContent, created_at: new Date().toISOString() }]);
+      setMessages((prev) => [...prev, { id: assistantMessageId, session_id: sessionId, role: 'assistant', content: fullContent, token_usage: tokenUsage, usage_breakdown: usageBreakdown, created_at: new Date().toISOString() }]);
       setStreamingContent('');
       loadSessions(t);
     } catch {
@@ -1243,6 +1316,8 @@ export function App() {
       streamVisibleRef.current = '';
       if (isTokenCurrent(t)) {
         setStreaming(false);
+        setContextStage('');
+        setContextRefresh((value) => value + 1);
         setStreamingContent('');
       }
     }
@@ -1367,38 +1442,61 @@ export function App() {
   };
 
   const handleDeleteFile = async (fileId: number) => {
-    if (!token || !window.confirm('确定删除这个文件吗？')) return;
+    if (!token) return;
     const currentToken = token;
-    await deleteFile(currentToken, fileId);
-    if (isTokenCurrent(currentToken)) {
-      loadFiles(currentToken);
-      setToastMessage('文件已删除');
+    if (!(await confirm({ title: '删除这个文件？', description: '文件及其知识库索引将被删除，此操作无法撤销。' })) || !isTokenCurrent(currentToken)) return;
+    try {
+      await deleteFile(currentToken, fileId);
+      if (isTokenCurrent(currentToken)) {
+        loadFiles(currentToken);
+        setToastMessage('文件已删除');
+      }
+    } catch (err: unknown) {
+      if (isTokenCurrent(currentToken)) setToastMessage(`文件删除失败：${parseApiError(err)}`);
     }
   };
 
   const handleDeleteSession = async (sessionId: number, e: React.MouseEvent) => {
     e.stopPropagation();
-    if (!token || !window.confirm('确定删除这个会话吗？')) return;
+    if (!token) return;
     const currentToken = token;
-    await deleteSession(currentToken, sessionId);
-    if (!isTokenCurrent(currentToken)) return;
-    if (activeSessionId === sessionId) {
-      setActiveSessionId(null);
-      setMessages([]);
+    if (!(await confirm({ title: '删除这个会话？', description: '此会话中的全部消息将被删除，此操作无法撤销。' })) || !isTokenCurrent(currentToken)) return;
+    try {
+      await deleteSession(currentToken, sessionId);
+      if (!isTokenCurrent(currentToken)) return;
+      if (activeSessionId === sessionId) {
+        setActiveSessionId(null);
+        setMessages([]);
+      }
+      loadSessions(currentToken);
+      setToastMessage('会话已删除');
+    } catch (err: unknown) {
+      if (isTokenCurrent(currentToken)) setToastMessage(`会话删除失败：${parseApiError(err)}`);
     }
-    loadSessions(currentToken);
   };
 
-  useEffect(() => { messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [messages, streamingContent]);
+  useEffect(() => {
+    followLatestRef.current = true;
+    const viewport = chatScrollRef.current;
+    if (viewport) viewport.scrollTop = viewport.scrollHeight;
+    setActiveTurn(Math.max(0, turns.length - 1));
+  }, [activeSessionId, navTab]);
+
+  useEffect(() => {
+    const viewport = chatScrollRef.current;
+    if (viewport && followLatestRef.current) {
+      viewport.scrollTop = viewport.scrollHeight;
+      setActiveTurn(Math.max(0, turns.length - 1));
+    }
+  }, [messages, streamingContent]);
 
   if (!token || !user) {
     return <Login onLogin={setToken} token={token} />;
   }
 
-  const filesCount = `${files.filter(f => f.status === 'indexed').length}/${files.length}`;
-
   return (
     <div className="app-layout">
+      {confirmDialog}
       {toastMessage && <Toast message={toastMessage} onClose={() => setToastMessage('')} />}
       <SourcePreviewModal preview={sourcePreview} onClose={() => setSourcePreview(null)} />
       <FilePreviewModal preview={filePreview} onClose={() => setFilePreview(null)} />
@@ -1413,7 +1511,7 @@ export function App() {
           </div>
         </div>
 
-        <button className="btn-new-session" onClick={async () => {
+        <button disabled={streaming} className="btn-new-session" onClick={async () => {
           if (!token) return;
           try {
             const s = await createSession(token, DEFAULT_SESSION_TITLE);
@@ -1430,52 +1528,31 @@ export function App() {
 
         <div className="sidebar-list">
           {sessions.map((s) => (
-            <button
-              key={s.id}
-              className={`sidebar-item ${s.id === activeSessionId && navTab === 'sessions' ? 'active' : ''}`}
-              onClick={() => switchSession(s.id)}
-            >
-              <span className="sidebar-item-title">{s.title}</span>
-              <span className="sidebar-item-date">{new Date(s.updated_at).toLocaleDateString('zh-CN')}</span>
-              <span className="btn-delete-session" onClick={(e) => handleDeleteSession(s.id, e)} title="删除会话" aria-label="删除会话">&times;</span>
-            </button>
+            <div key={s.id} className={`sidebar-session ${s.id === activeSessionId && navTab === 'sessions' ? 'active' : ''}`}>
+              <button type="button" className="sidebar-item" onClick={() => switchSession(s.id)}>
+                <span className="sidebar-item-title">{s.title}</span>
+              </button>
+              <button type="button" className="btn-delete-session" onClick={(e) => handleDeleteSession(s.id, e)} title="删除会话" aria-label={`删除会话：${s.title}`}>&times;</button>
+            </div>
           ))}
           {sessions.length === 0 && <p className="sidebar-empty">暂无会话，点击上方按钮创建</p>}
         </div>
 
-        <nav className="sidebar-nav">
-          <button className={`sidebar-link ${navTab === 'files' ? 'active' : ''}`} onClick={() => setNavTab('files')}>
-            文件管理 <span className="sidebar-link-badge">{filesCount} 已索引</span>
-          </button>
-          <button className={`sidebar-link ${navTab === 'reports' ? 'active' : ''}`} onClick={() => setNavTab('reports')}>
-            报告中心
-          </button>
-          <button className={`sidebar-link ${navTab === 'memories' ? 'active' : ''}`} onClick={() => setNavTab('memories')}>
-            长期记忆
-          </button>
-          <button className={`sidebar-link ${navTab === 'settings' ? 'active' : ''}`} onClick={() => setNavTab('settings')}>
-            系统设置
-          </button>
-        </nav>
+        <UserMenu user={user} activeTab={navTab} onNavigate={setNavTab} onLogout={() => { resetState(); setToken(null); }} />
 
-        <div className="sidebar-footer">
-          <div className="sidebar-avatar">{user.nickname.charAt(0).toUpperCase()}</div>
-          <div>
-            <div className="sidebar-user-name">{user.nickname}</div>
-            <div className="sidebar-user-role">{user.is_admin ? '管理员' : '普通用户'}</div>
-          </div>
-          <button className="btn-logout" style={{marginLeft: 'auto'}} onClick={() => { resetState(); setToken(null); }}>退出</button>
-        </div>
       </aside>
 
       {/* Main Content */}
       <main className="main-area">
-        {navTab === 'reports' ? (
+        <div className="mobile-user-menu"><UserMenu compact user={user} activeTab={navTab} onNavigate={setNavTab} onLogout={() => { resetState(); setToken(null); }} /></div>
+        {navTab === 'profile' ? (
+          <UserProfile user={user} />
+        ) : navTab === 'reports' ? (
           <ReportPage token={token} onToast={setToastMessage} />
         ) : navTab === 'memories' ? (
           <MemoryPage token={token} onToast={setToastMessage} />
         ) : navTab === 'settings' ? (
-          <SettingsPage token={token} user={user} onToast={setToastMessage} />
+          <SettingsPage token={token} user={user} onToast={setToastMessage} onModelChange={setActiveModel} />
         ) : navTab === 'files' ? (
           <FileManager files={files} uploadingFile={uploadingFile} onUpload={handleFileUpload} onIndex={handleIndex} onPreview={handlePreviewFile} onDelete={handleDeleteFile} />
         ) : activeSessionId && activeSession ? (
@@ -1496,53 +1573,50 @@ export function App() {
                 </form>
               ) : (
                 <>
-                  <h1>{activeSession.title}</h1>
-                  <span className="topbar-badge">{messages.length} 条消息</span>
-                  <button className="topbar-btn" onClick={() => { setTitleDraft(activeSession.title); setEditingTitle(true); }}>编辑标题</button>
+                  <div className="chat-title-group">
+                    <h1>{activeSession.title}</h1>
+                    <button type="button" className="chat-title-edit" aria-label="修改会话标题" onClick={() => { setTitleDraft(activeSession.title); setEditingTitle(true); }}>
+                      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true"><path d="m15 5 4 4M4 20l4-1 12-12a2.8 2.8 0 0 0-4-4L4 15Z" /></svg>
+                    </button>
+                  </div>
                 </>
               )}
             </header>
 
-            {/* Info strip */}
-            <div className="info-strip">
-              <div className="info-strip-item">
-                <span className="info-strip-dot" />
-                模型 <span className="info-strip-val">deepseek-v4</span>
-              </div>
-              <div className="info-strip-item">
-                消息 <span className="info-strip-val">{messages.length}</span>
-              </div>
-            </div>
-
             {/* Messages */}
-            <div className="chat-messages">
-              {messages.map((m) => (
-                <MessageBubble key={`${m.id}-${m.created_at}`} message={m} onOpenCitation={handleOpenCitation} />
-              ))}
-              {streamingContent && (
-                <MessageBubble message={{ role: 'assistant', content: streamingContent }} streaming onOpenCitation={handleOpenCitation} />
-              )}
-              {streaming && !streamingContent && (
-                <div className="message message--assistant">
-                  <div className="message-content"><span className="typing-indicator">正在检索知识库…</span></div>
+            <div className="chat-thread">
+              <div className="chat-scroll" ref={chatScrollRef} onScroll={updateReadingPosition}>
+                <div className="chat-messages">
+                  {messages.map((m, index) => (
+                    <div className="chat-message-anchor" data-message-index={index} key={`${m.id}-${m.created_at}`}>
+                      <MessageBubble message={m} onOpenCitation={handleOpenCitation} onOpenHistory={setHistoryMessageId} />
+                    </div>
+                  ))}
+                  {streamingContent && (
+                    <MessageBubble message={{ role: 'assistant', content: streamingContent }} streaming onOpenCitation={handleOpenCitation} />
+                  )}
+                  {streaming && !streamingContent && (
+                    <div className="message message--assistant">
+                      <div className="message-content"><span className="typing-indicator">{contextStage === 'preparing' || contextStage === 'compacting' ? '正在整理上下文…' : '正在生成回复…'}</span></div>
+                    </div>
+                  )}
                 </div>
-              )}
-              <div ref={messagesEndRef} />
+              </div>
+              <ConversationTimeline turns={turns} activeTurn={activeTurn} onJump={jumpToTurn} />
             </div>
 
             {/* Input */}
-            <div className="chat-input-bar">
-              <input
-                placeholder="输入问题，基于知识库文件回答… Enter 发送"
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); } }}
-                disabled={streaming}
-              />
-              <button type="button" className="btn-send" disabled={streaming || !input.trim()} onClick={handleSend}>
-                {streaming ? '生成中' : '发送'}
-              </button>
-            </div>
+            <ChatComposer
+              key={activeSessionId}
+              value={input}
+              onChange={setInput}
+              onSend={handleSend}
+              streaming={streaming}
+              model={activeModel}
+              canChangeModel={Boolean(user.is_admin)}
+              onSwitchModel={switchChatModel}
+              contextControl={<ContextPanel key={activeSessionId} token={token} sessionId={activeSessionId} refreshKey={contextRefresh} stage={contextStage} messageId={historyMessageId} onCloseHistory={() => setHistoryMessageId(null)} />}
+            />
           </>
         ) : (
           <div className="chat-empty">

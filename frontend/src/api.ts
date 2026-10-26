@@ -1,3 +1,5 @@
+import type { ContextStatus, ContextSummary, HistoryResult, Message as ChatMessage } from './types';
+import type { TokenUsage as StreamUsage } from './types';
 import type { BackgroundJob, ChatSession, FileIndexTaskResponse, FilePreviewResponse, Memory, ModelSettings, RagSettings, Report, ReportGenerateRequest, ReportGenerateResponse, SendMessageResponse, SessionDetail, SourceLookupResponse, StreamEvent, TokenResponse, UploadedFile, User } from './types';
 
 export type { BackgroundJob, ChatSession, FilePreviewResponse, Memory, Message, ModelSettings, RagSettings, Report, ReportGenerateRequest, ReportGenerateResponse, SendMessageResponse, SessionDetail, SourceLookupResponse, StreamEvent, TokenResponse, UploadedFile, User } from './types';
@@ -153,8 +155,6 @@ export function getModelSettings(token: string) {
 export function updateModelSettings(token: string, payload: {
   chat_provider: string;
   chat_model: string;
-  embedding_provider: string;
-  embedding_model: string;
 }) {
   return request<ModelSettings>('/settings/model', {
     method: 'PATCH',
@@ -232,11 +232,28 @@ export async function streamMessage(
         onEvent({ type, name: String(payload.name || '工具结果'), content: String(payload.content || '') });
       } else if (type === 'workflow_step') {
         onEvent({ type, name: String(payload.name || 'workflow') });
+      } else if (type === 'context_status') {
+        onEvent({ type, stage: String(payload.stage || 'preparing'), warning: payload.warning as string | undefined });
       } else if (type === 'error') {
-        onEvent({ type, content: String(payload.content || '生成回复失败') });
-      } else if (type === 'start' || type === 'done') {
+        onEvent({ type, content: String(payload.content || '生成回复失败'), message_id: payload.message_id as number | undefined, token_usage: payload.token_usage as StreamUsage, ...(payload.usage_breakdown ? { usage_breakdown: payload.usage_breakdown as ChatMessage['usage_breakdown'] } : {}) });
+      } else if (type === 'done') {
+        onEvent({ type, message_id: payload.message_id as number | undefined, token_usage: payload.token_usage as StreamUsage, ...(payload.usage_breakdown ? { usage_breakdown: payload.usage_breakdown as ChatMessage['usage_breakdown'] } : {}) });
+      } else if (type === 'start') {
         onEvent({ type });
       }
     }
   }
+}
+
+export function getContextStatus(token: string, sessionId: number) {
+  return request<ContextStatus>(`/chat/sessions/${sessionId}/context`, {}, token);
+}
+export function getContextSummaries(token: string, sessionId: number) {
+  return request<ContextSummary[]>(`/chat/sessions/${sessionId}/context/summaries`, {}, token);
+}
+export function getConversationHistory(token: string, sessionId: number, query = '', messageId?: number) {
+  const params = new URLSearchParams();
+  if (query) params.set('query', query);
+  if (messageId !== undefined) params.set('message_id', String(messageId));
+  return request<HistoryResult>(`/chat/sessions/${sessionId}/history?${params}`, {}, token);
 }
